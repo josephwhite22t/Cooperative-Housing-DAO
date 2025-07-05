@@ -9,6 +9,13 @@
 (define-constant ERR_PROPOSAL_NOT_PASSED (err u107))
 (define-constant ERR_ALREADY_EXECUTED (err u108))
 (define-constant ERR_INSUFFICIENT_TOKENS (err u109))
+(define-constant ERR_REPUTATION_OVERFLOW (err u200))
+(define-constant ERR_INSUFFICIENT_REPUTATION (err u201))
+(define-constant REPUTATION_PROPOSAL_BONUS u10)
+(define-constant REPUTATION_VOTE_BONUS u5)
+(define-constant REPUTATION_CONTRIBUTION_MULTIPLIER u2)
+(define-constant REPUTATION_DECAY_RATE u1)
+(define-constant MAX_REPUTATION u10000)
 
 (define-fungible-token housing-token)
 
@@ -205,5 +212,102 @@
             (/ (* tokens u10000) total)
             u0
         )
+    )
+)
+
+
+(define-map member-reputation principal uint)
+(define-map reputation-actions principal {
+    proposals-created: uint,
+    votes-cast: uint,
+    last-activity-block: uint
+})
+
+(define-public (award-reputation (member principal) (points uint))
+    (let ((current-reputation (default-to u0 (map-get? member-reputation member))))
+        (asserts! (<= (+ current-reputation points) MAX_REPUTATION) ERR_REPUTATION_OVERFLOW)
+        (map-set member-reputation member (+ current-reputation points))
+        (ok (+ current-reputation points))
+    )
+)
+
+(define-public (deduct-reputation (member principal) (points uint))
+    (let ((current-reputation (default-to u0 (map-get? member-reputation member))))
+        (if (>= current-reputation points)
+            (begin
+                (map-set member-reputation member (- current-reputation points))
+                (ok (- current-reputation points))
+            )
+            (begin
+                (map-set member-reputation member u0)
+                (ok u0)
+            )
+        )
+    )
+)
+
+(define-public (update-reputation-for-proposal (proposer principal))
+    (let ((actions (default-to {proposals-created: u0, votes-cast: u0, last-activity-block: u0}
+                               (map-get? reputation-actions proposer))))
+        (map-set reputation-actions proposer (merge actions {
+            proposals-created: (+ (get proposals-created actions) u1),
+            last-activity-block: stacks-block-height
+        }))
+        (award-reputation proposer REPUTATION_PROPOSAL_BONUS)
+    )
+)
+
+(define-public (update-reputation-for-vote (voter principal))
+    (let ((actions (default-to {proposals-created: u0, votes-cast: u0, last-activity-block: u0}
+                               (map-get? reputation-actions voter))))
+        (map-set reputation-actions voter (merge actions {
+            votes-cast: (+ (get votes-cast actions) u1),
+            last-activity-block: stacks-block-height
+        }))
+        (award-reputation voter REPUTATION_VOTE_BONUS)
+    )
+)
+
+(define-public (update-reputation-for-contribution (contributor principal) (amount uint))
+    (let ((reputation-points (/ amount u1000000)))
+        (if (> reputation-points u0)
+            (award-reputation contributor (* reputation-points REPUTATION_CONTRIBUTION_MULTIPLIER))
+            (ok u0)
+        )
+    )
+)
+
+(define-public (apply-reputation-decay (member principal))
+    (let ((actions (map-get? reputation-actions member)))
+        (match actions
+            member-actions
+            (if (> (- stacks-block-height (get last-activity-block member-actions)) u1000)
+                (deduct-reputation member REPUTATION_DECAY_RATE)
+                (ok (default-to u0 (map-get? member-reputation member)))
+            )
+            (ok u0)
+        )
+    )
+)
+
+(define-read-only (get-member-reputation (member principal))
+    (default-to u0 (map-get? member-reputation member))
+)
+
+(define-read-only (get-reputation-multiplier (member principal))
+    (let ((reputation (default-to u0 (map-get? member-reputation member))))
+        (+ u100 (/ reputation u100))
+    )
+)
+
+(define-read-only (get-member-actions (member principal))
+    (default-to {proposals-created: u0, votes-cast: u0, last-activity-block: u0}
+                (map-get? reputation-actions member))
+)
+
+(define-read-only (calculate-reputation-weighted-voting-power (member principal))
+    (let ((base-tokens (default-to u0 (map-get? token-holders member)))
+          (reputation-multiplier (get-reputation-multiplier member)))
+        (/ (* base-tokens reputation-multiplier) u100)
     )
 )
