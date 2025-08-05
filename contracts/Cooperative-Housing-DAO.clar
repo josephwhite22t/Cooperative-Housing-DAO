@@ -17,6 +17,12 @@
 (define-constant REPUTATION_DECAY_RATE u1)
 (define-constant MAX_REPUTATION u10000)
 
+(define-constant ACTIVITY_WINDOW u1008)
+(define-constant MIN_ACTIONS_FOR_REWARD u3)
+(define-constant ACTIVITY_TOKEN_REWARD u50)
+(define-constant STREAK_BONUS_MULTIPLIER u2)
+(define-constant MAX_STREAK_BONUS u200)
+
 (define-fungible-token housing-token)
 
 (define-data-var total-supply uint u0)
@@ -309,5 +315,89 @@
     (let ((base-tokens (default-to u0 (map-get? token-holders member)))
           (reputation-multiplier (get-reputation-multiplier member)))
         (/ (* base-tokens reputation-multiplier) u100)
+    )
+)
+
+
+(define-map member-activity principal {
+    current-window-start: uint,
+    actions-this-window: uint,
+    consecutive-active-windows: uint,
+    total-rewards-earned: uint
+})
+
+(define-public (track-member-action (member principal))
+    (let ((current-window-start (/ stacks-block-height ACTIVITY_WINDOW))
+          (activity (default-to {current-window-start: u0, actions-this-window: u0, 
+                                consecutive-active-windows: u0, total-rewards-earned: u0}
+                               (map-get? member-activity member))))
+        (if (is-eq (get current-window-start activity) current-window-start)
+            (map-set member-activity member (merge activity {
+                actions-this-window: (+ (get actions-this-window activity) u1)
+            }))
+            (let ((was-active (>= (get actions-this-window activity) MIN_ACTIONS_FOR_REWARD))
+                  (new-streak (if was-active 
+                                (+ (get consecutive-active-windows activity) u1) 
+                                u0)))
+                (map-set member-activity member {
+                    current-window-start: current-window-start,
+                    actions-this-window: u1,
+                    consecutive-active-windows: new-streak,
+                    total-rewards-earned: (get total-rewards-earned activity)
+                })
+            )
+        )
+        (ok true)
+    )
+)
+
+(define-public (claim-activity-reward)
+    (let ((current-window-start (/ stacks-block-height ACTIVITY_WINDOW))
+          (activity (unwrap! (map-get? member-activity tx-sender) ERR_NOT_AUTHORIZED)))
+        (asserts! (< (get current-window-start activity) current-window-start) ERR_VOTING_ACTIVE)
+        (asserts! (>= (get actions-this-window activity) MIN_ACTIONS_FOR_REWARD) ERR_INSUFFICIENT_TOKENS)
+        
+        (let ((base-reward ACTIVITY_TOKEN_REWARD)
+              (calculated-bonus (* (get consecutive-active-windows activity) STREAK_BONUS_MULTIPLIER))
+              (streak-bonus (if (> calculated-bonus MAX_STREAK_BONUS) MAX_STREAK_BONUS calculated-bonus))
+              (total-reward (+ base-reward streak-bonus)))
+            (try! (ft-mint? housing-token total-reward tx-sender))
+            (var-set total-supply (+ (var-get total-supply) total-reward))
+            (map-set token-holders tx-sender (+ (get-token-balance tx-sender) total-reward))
+            (map-set member-activity tx-sender (merge activity {
+                total-rewards-earned: (+ (get total-rewards-earned activity) total-reward)
+            }))
+            (ok total-reward)
+        )
+    )
+)
+
+(define-read-only (get-member-activity (member principal))
+    (default-to {current-window-start: u0, actions-this-window: u0, 
+                consecutive-active-windows: u0, total-rewards-earned: u0}
+               (map-get? member-activity member))
+)
+
+(define-read-only (calculate-pending-reward (member principal))
+    (let ((activity (get-member-activity member))
+          (current-window (/ stacks-block-height ACTIVITY_WINDOW)))
+        (if (and (< (get current-window-start activity) current-window)
+                (>= (get actions-this-window activity) MIN_ACTIONS_FOR_REWARD))
+            (let ((calculated-bonus (* (get consecutive-active-windows activity) STREAK_BONUS_MULTIPLIER)))
+                (+ ACTIVITY_TOKEN_REWARD 
+                   (if (> calculated-bonus MAX_STREAK_BONUS) MAX_STREAK_BONUS calculated-bonus)))
+            u0
+        )
+    )
+)
+
+(define-read-only (get-activity-window-progress)
+    (let ((current-block stacks-block-height)
+          (window-start (* (/ current-block ACTIVITY_WINDOW) ACTIVITY_WINDOW)))
+        {
+            blocks-into-window: (- current-block window-start),
+            blocks-remaining: (- ACTIVITY_WINDOW (- current-block window-start)),
+            window-number: (/ current-block ACTIVITY_WINDOW)
+        }
     )
 )
