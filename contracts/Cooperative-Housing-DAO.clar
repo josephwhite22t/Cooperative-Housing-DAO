@@ -23,6 +23,16 @@
 (define-constant STREAK_BONUS_MULTIPLIER u2)
 (define-constant MAX_STREAK_BONUS u200)
 
+(define-constant ERR_DISPUTE_NOT_FOUND (err u300))
+(define-constant ERR_CANNOT_DISPUTE_SELF (err u301))
+(define-constant ERR_DISPUTE_ALREADY_EXISTS (err u302))
+(define-constant ERR_DISPUTE_RESOLVED (err u303))
+(define-constant ERR_INVALID_PENALTY_AMOUNT (err u304))
+(define-constant DISPUTE_VOTING_PERIOD u144)
+(define-constant MAX_PENALTY_PERCENTAGE u20)
+
+(define-data-var dispute-counter uint u0)
+
 (define-fungible-token housing-token)
 
 (define-data-var total-supply uint u0)
@@ -400,4 +410,104 @@
             window-number: (/ current-block ACTIVITY_WINDOW)
         }
     )
+)
+
+
+(define-map disputes uint {
+    id: uint,
+    complainant: principal,
+    accused: principal,
+    category: (string-ascii 20),
+    description: (string-ascii 300),
+    penalty-amount: uint,
+    votes-guilty: uint,
+    votes-innocent: uint,
+    end-block: uint,
+    resolved: bool,
+    guilty: bool
+})
+
+(define-map dispute-votes {dispute-id: uint, voter: principal} bool)
+
+
+
+(define-public (file-dispute (accused principal) (category (string-ascii 20)) (description (string-ascii 300)) (penalty-amount uint))
+    (let ((dispute-id (+ (var-get dispute-counter) u1))
+          (complainant-balance (get-token-balance tx-sender))
+          (max-penalty (/ (* complainant-balance MAX_PENALTY_PERCENTAGE) u100)))
+        (asserts! (not (is-eq tx-sender accused)) ERR_CANNOT_DISPUTE_SELF)
+        (asserts! (> complainant-balance u0) ERR_INSUFFICIENT_TOKENS)
+        (asserts! (<= penalty-amount max-penalty) ERR_INVALID_PENALTY_AMOUNT)
+
+        
+        (map-set disputes dispute-id {
+            id: dispute-id,
+            complainant: tx-sender,
+            accused: accused,
+            category: category,
+            description: description,
+            penalty-amount: penalty-amount,
+            votes-guilty: u0,
+            votes-innocent: u0,
+            end-block: (+ stacks-block-height DISPUTE_VOTING_PERIOD),
+            resolved: false,
+            guilty: false
+        })
+        (var-set dispute-counter dispute-id)
+        (ok dispute-id)
+    )
+)
+
+(define-public (vote-on-dispute (dispute-id uint) (guilty-vote bool))
+    (let ((dispute (unwrap! (map-get? disputes dispute-id) ERR_DISPUTE_NOT_FOUND))
+          (voter-tokens (get-token-balance tx-sender))
+          (vote-key {dispute-id: dispute-id, voter: tx-sender}))
+        (asserts! (> voter-tokens u0) ERR_INSUFFICIENT_TOKENS)
+        (asserts! (<= stacks-block-height (get end-block dispute)) ERR_VOTING_ENDED)
+        (asserts! (not (get resolved dispute)) ERR_DISPUTE_RESOLVED)
+        (asserts! (is-none (map-get? dispute-votes vote-key)) ERR_ALREADY_VOTED)
+        
+        (map-set dispute-votes vote-key guilty-vote)
+        (if guilty-vote
+            (map-set disputes dispute-id (merge dispute {votes-guilty: (+ (get votes-guilty dispute) voter-tokens)}))
+            (map-set disputes dispute-id (merge dispute {votes-innocent: (+ (get votes-innocent dispute) voter-tokens)}))
+        )
+        (ok true)
+    )
+)
+
+(define-public (resolve-dispute (dispute-id uint))
+    (let ((dispute (unwrap! (map-get? disputes dispute-id) ERR_DISPUTE_NOT_FOUND))
+          (total-votes (+ (get votes-guilty dispute) (get votes-innocent dispute))))
+        (asserts! (> stacks-block-height (get end-block dispute)) ERR_VOTING_ACTIVE)
+        (asserts! (not (get resolved dispute)) ERR_DISPUTE_RESOLVED)
+        (asserts! (> total-votes (/ (var-get total-supply) u4)) ERR_INSUFFICIENT_TOKENS)
+        
+        (let ((is-guilty (> (get votes-guilty dispute) (get votes-innocent dispute))))
+            (map-set disputes dispute-id (merge dispute {resolved: true, guilty: is-guilty}))
+            (if (and is-guilty (> (get penalty-amount dispute) u0))
+                (begin
+                    (try! (transfer-tokens (get penalty-amount dispute) (get complainant dispute)))
+                    (ok {resolved: true, guilty: is-guilty, penalty-applied: (get penalty-amount dispute)})
+                )
+                (ok {resolved: true, guilty: is-guilty, penalty-applied: u0})
+            )
+        )
+    )
+)
+
+(define-read-only (get-dispute (dispute-id uint))
+    (map-get? disputes dispute-id)
+)
+
+(define-read-only (get-dispute-vote (dispute-id uint) (voter principal))
+    (map-get? dispute-votes {dispute-id: dispute-id, voter: voter})
+)
+
+(define-read-only (get-active-dispute (complainant principal) (accused principal))
+    none
+)
+
+(define-read-only (get-dispute-count)
+    (var-get dispute-counter)
 )
