@@ -31,6 +31,9 @@
 (define-constant DISPUTE_VOTING_PERIOD u144)
 (define-constant MAX_PENALTY_PERCENTAGE u20)
 
+(define-constant ERR_SELF_DELEGATION (err u400))
+(define-constant ERR_NO_DELEGATION_FOUND (err u401))
+
 (define-data-var dispute-counter uint u0)
 
 (define-fungible-token housing-token)
@@ -510,4 +513,64 @@
 
 (define-read-only (get-dispute-count)
     (var-get dispute-counter)
+)
+
+
+(define-map delegations principal principal)
+(define-map delegation-power principal uint)
+
+(define-public (delegate-voting-power (delegate principal))
+    (let ((delegator-tokens (get-token-balance tx-sender))
+          (current-delegate (map-get? delegations tx-sender)))
+        (asserts! (not (is-eq tx-sender delegate)) ERR_SELF_DELEGATION)
+        (asserts! (> delegator-tokens u0) ERR_INSUFFICIENT_TOKENS)
+        
+        (match current-delegate
+            old-delegate
+            (map-set delegation-power old-delegate 
+                (- (default-to u0 (map-get? delegation-power old-delegate)) delegator-tokens))
+            true
+        )
+        
+        (map-set delegations tx-sender delegate)
+        (map-set delegation-power delegate 
+            (+ (default-to u0 (map-get? delegation-power delegate)) delegator-tokens))
+        (ok true)
+    )
+)
+
+(define-public (revoke-delegation)
+    (let ((delegator-tokens (get-token-balance tx-sender))
+          (current-delegate (unwrap! (map-get? delegations tx-sender) ERR_NO_DELEGATION_FOUND)))
+        (map-delete delegations tx-sender)
+        (map-set delegation-power current-delegate 
+            (- (default-to u0 (map-get? delegation-power current-delegate)) delegator-tokens))
+        (ok true)
+    )
+)
+
+(define-read-only (get-delegation (delegator principal))
+    (map-get? delegations delegator)
+)
+
+(define-read-only (get-delegated-power (delegate principal))
+    (default-to u0 (map-get? delegation-power delegate))
+)
+
+(define-read-only (get-total-voting-power (member principal))
+    (+ (get-token-balance member) (get-delegated-power member))
+)
+
+(define-read-only (has-delegated (member principal))
+    (is-some (map-get? delegations member))
+)
+
+(define-read-only (calculate-delegate-influence (delegate principal))
+    (let ((total-power (get-total-voting-power delegate))
+          (supply (var-get total-supply)))
+        (if (> supply u0)
+            (/ (* total-power u10000) supply)
+            u0
+        )
+    )
 )
