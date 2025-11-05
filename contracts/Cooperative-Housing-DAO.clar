@@ -34,6 +34,10 @@
 (define-constant ERR_SELF_DELEGATION (err u400))
 (define-constant ERR_NO_DELEGATION_FOUND (err u401))
 
+(define-constant ERR_VETO_WINDOW_EXPIRED (err u110))
+(define-constant ERR_PROPOSAL_VETOED (err u111))
+(define-constant VETO_WINDOW_BLOCKS u72)
+
 (define-data-var dispute-counter uint u0)
 
 (define-fungible-token housing-token)
@@ -572,5 +576,45 @@
             (/ (* total-power u10000) supply)
             u0
         )
+    )
+)
+
+(define-map proposal-vetoes uint {
+    vetoed: bool,
+    veto-reason: (string-ascii 200),
+    veto-block: uint
+})
+
+(define-public (veto-proposal (proposal-id uint) (reason (string-ascii 200)))
+    (let ((proposal (unwrap! (map-get? proposals proposal-id) ERR_PROPOSAL_NOT_FOUND))
+          (current-block stacks-block-height)
+          (proposal-age (- current-block (get start-block proposal))))
+        (asserts! (is-eq tx-sender CONTRACT_OWNER) ERR_NOT_AUTHORIZED)
+        (asserts! (<= proposal-age VETO_WINDOW_BLOCKS) ERR_VETO_WINDOW_EXPIRED)
+        (asserts! (not (get executed proposal)) ERR_ALREADY_EXECUTED)
+        
+        (map-set proposal-vetoes proposal-id {
+            vetoed: true,
+            veto-reason: reason,
+            veto-block: current-block
+        })
+        (map-set proposals proposal-id (merge proposal {
+            passed: false,
+            executed: true
+        }))
+        (ok true)
+    )
+)
+
+(define-read-only (get-veto-info (proposal-id uint))
+    (map-get? proposal-vetoes proposal-id)
+)
+
+(define-read-only (is-in-veto-window (proposal-id uint))
+    (match (map-get? proposals proposal-id)
+        proposal
+        (let ((proposal-age (- stacks-block-height (get start-block proposal))))
+            (<= proposal-age VETO_WINDOW_BLOCKS))
+        false
     )
 )
